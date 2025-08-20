@@ -1,0 +1,59 @@
+version: "3.9"
+
+services:
+  app:
+    image: python:3.11
+    container_name: teste-classificador
+    env_file: .env
+    working_dir: /app
+    volumes:
+      - ./app:/app
+      - ./data:/app/data
+      - ./out:/app/out
+    command: >
+      sh -c "pip install --no-cache-dir -r requirements.txt &&
+             python evaluator.py"
+    depends_on:
+      - influxdb
+    networks:
+      - monitoring
+
+  influxdb:
+    image: influxdb:2.7
+    container_name: influxdb
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUX_USER:-admin}
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUX_PASSWORD:-admin123}
+      - DOCKER_INFLUXDB_INIT_ORG=${INFLUX_ORG:-api-tests}
+      - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUX_BUCKET:-classificacao_api}
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUX_TOKEN:-supersecrettoken}
+    networks:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin123}
+    depends_on:
+      - influxdb
+    networks:
+      - monitoring
+
+networks:
+  monitoring:
+
+volumes:
+  influxdb_data:
+  grafana_data:
