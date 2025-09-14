@@ -7,6 +7,7 @@ from influxdb_client .client.write_api import SYNCHRONOUS
 import datetime
 import os
 import sys
+import time
 
 CLASSIFICADOR_URL = os.getenv("CLASSIFICADOR_URL")
 INFLUX_URL = os.getenv("INFLUX_URL")
@@ -15,13 +16,19 @@ INFLUX_ORG = os.getenv("INFLUX_ORG")
 INFLUX_BUCKET = os.getenv("INFLUX_BUCKET")
 DATASET_FILE = os.getenv("DATASET_FILE")
 
+print(f"Iniciando a leitura do dataset {DATASET_FILE}...")
+
 df = pd.read_csv(DATASET_FILE)
+
+print(f"Dataset carregado.")
 
 resultados = []
 y_true = []
 y_pred = []
 
-for _, row in df.iterrows():
+for index, row in df.iterrows():
+    print(f"Analisando a petição de número {index + 1}...")
+
     texto = row["texto"]
     cod_assunto_esperado = row["codigo_assunto"]
     # print(texto)
@@ -55,10 +62,10 @@ for _, row in df.iterrows():
 
     except Exception as e:
         print(f"Erro ao processar a petição. Erro: {e}")
-        predicao_final = "ERRO"
+        continue
         
     resultados.append({
-        "texto": texto[:50] + "...",
+        "texto": texto,
         "cod_assunto_esperado": cod_assunto_esperado,
         "codigos_preditos": ', '.join(map(str, codigos_classificados)) if 'codigos_classificados' in locals() else 'ERRO',
         "predicao_para_metrica": predicao_final
@@ -66,23 +73,33 @@ for _, row in df.iterrows():
 
     y_true.append(cod_assunto_esperado)
     y_pred.append(predicao_final)
+    
+    print(f"Aguardando para analisar a próxima petição...")
+    time.sleep(5)
 
 if not y_true or not y_pred:
     print("A lista está vazia. O script será encerrado.")
     sys.exit()
+
+print(f"Classificação concluída.")
+print(f"Iniciando cálculo das métricas de acurácia, precisão, recall e f1-score...")
 
 acuracia = accuracy_score(y_true, y_pred)
 precisao = precision_score(y_true, y_pred, average="weighted", zero_division=0)
 revocacao = recall_score(y_true, y_pred, average="weighted", zero_division=0)
 f1 = f1_score(y_true, y_pred, average="weighted", zero_division=0)
 
-print(f"\nAcurácia: {acuracia:.4f}")
+print(f"Acurácia: {acuracia:.4f}")
 print(f"Precisão: {precisao:.4f}")
 print(f"Revocação: {revocacao:.4f}")
 print(f"F1-score: {f1:.4f}")
 
+print(f"Salvando resultado...")
+
 pd.DataFrame(resultados).to_csv("data/resultados_classificacao.csv", index=False)
-print("Resultados salvos em resultados_classificacao.csv")
+print("Resultados salvos em resultados_classificacao.csv.")
+
+print(f"Enviando resultado para o Influxdb...")
 
 metricas = [
     Point("classificacao_api")
@@ -99,7 +116,7 @@ try:
     write_api = client.write_api(write_options=SYNCHRONOUS)
     write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=metricas)
     client.close()
-    print("Métricas enviadas para o InfluxDB com sucesso!")
+    print("Métricas enviadas para o InfluxDB com sucesso.")
 except ApiException as e:
     print("ERRO ao enviar dados para o InfluxDB:")
     print(f"  Status: {e.status}")
@@ -109,3 +126,5 @@ except ApiException as e:
 except Exception as e:
     print("Ocorreu um erro inesperado:")
     print(e)
+    
+print(f"Script finalizado.")
