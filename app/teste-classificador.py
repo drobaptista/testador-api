@@ -1,14 +1,15 @@
 import requests
 import pandas as pd
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.metrics import precision_score, recall_score, f1_score
+from sklearn.preprocessing import MultiLabelBinarizer
 from influxdb_client import InfluxDBClient, Point, WritePrecision
-from influxdb_client.rest import ApiException
-from influxdb_client .client.write_api import SYNCHRONOUS
+from influxdb_client.client.write_api import SYNCHRONOUS
 import datetime
 import os
 import sys
 import time
 
+# --- Configurações ---
 CLASSIFICADOR_URL = os.getenv("CLASSIFICADOR_URL")
 INFLUX_URL = os.getenv("INFLUX_URL")
 INFLUX_TOKEN = os.getenv("INFLUX_TOKEN")
@@ -17,114 +18,127 @@ INFLUX_BUCKET = os.getenv("INFLUX_BUCKET")
 DATASET_FILE = os.getenv("DATASET_FILE")
 
 print(f"Iniciando a leitura do dataset {DATASET_FILE}...")
-
 df = pd.read_csv(DATASET_FILE)
+df.dropna(subset=['texto', 'codigo_assunto'], inplace=True)
+print(f"Dataset carregado com {len(df)} registros.")
 
-print(f"Dataset carregado.")
+# --- Listas para armazenar os resultados ---
+resultados_detalhados = []
+y_true_list = [] # Para métricas multi-rótulo
+y_pred_list = [] # Para métricas multi-rótulo
+acertos = 0
+total_peticoes_processadas = 0
 
-resultados = []
-y_true = []
-y_pred = []
+session = requests.Session()
 
+# --- Loop Principal de Avaliação ---
 for index, row in df.iterrows():
-    print(f"Analisando a petição de número {index + 1}...")
-
+    print(f"Analisando a petição de número {index + 1}/{len(df)}...")
+    # if index > 9:
+    #     break
     texto = row["texto"]
-    cod_assunto_esperado = row["codigo_assunto"]
-    # print(texto)
-    # sys.exit()
+    # Converte a string "123|456" para uma lista de inteiros [123, 456]
+    cod_assuntos_esperados = [int(i.strip()) for i in str(row["codigo_assunto"]).split('|')]
+    
+    codigos_classificados = []
+    
     try:
-        response = requests.post(CLASSIFICADOR_URL, json={"texto": texto}, timeout=10)
+        response = session.post(CLASSIFICADOR_URL, json={"texto": texto}, timeout=20)
         response.raise_for_status()
         
-        resultados_api = response.json()
-        # print(resultados_api)
-        # sys.exit()
+        resultados_api = response.json().get("assuntos_selecionados", [])
+        
         if not resultados_api:
-            print(f"Atenção: A API retornou uma resposta vazia para o texto: {texto}")
-            continue
-        
-        codigos_classificados = [res['codigo'] for res in resultados_api]
-        
-        acertou = cod_assunto_esperado in codigos_classificados
-        
-        if acertou:
-            predicao_final = cod_assunto_esperado
+            print("Atenção: A API retornou uma resposta vazia.")
         else:
-            predicao_final = codigos_classificados[0] if codigos_classificados else "NENHUM"
-
-    except requests.exceptions.HTTPError as err:
-        print(f"Erro ao processar a petição. Erro: {err}")
-        print("---------------------------------")
-        print("Detalhes do erro da API:")
-        print(response.text)
-
+            codigos_classificados = [res['codigo'] for res in resultados_api]
 
     except Exception as e:
-        print(f"Erro ao processar a petição. Erro: {e}")
-        continue
-        
-    resultados.append({
-        "texto": texto,
-        "cod_assunto_esperado": cod_assunto_esperado,
-        "codigos_preditos": ', '.join(map(str, codigos_classificados)) if 'codigos_classificados' in locals() else 'ERRO',
-        "predicao_para_metrica": predicao_final
-    })
-
-    y_true.append(cod_assunto_esperado)
-    y_pred.append(predicao_final)
+        print(f"Erro ao processar a petição: {e}")
+        # Mesmo com erro, continuamos para não quebrar o loop, mas a predição será vazia
     
-    print(f"Aguardando para analisar a próxima petição...")
-    time.sleep(5)
+    total_peticoes_processadas += 1
 
-if not y_true or not y_pred:
-    print("A lista está vazia. O script será encerrado.")
+    # --- Lógica de Métrica Principal: "Acertou pelo menos um?" ---
+    # Usamos conjuntos (sets) para encontrar a interseção de forma eficiente
+    set_esperados = set(cod_assuntos_esperados)
+    set_preditos = set(codigos_classificados)
+    
+    acertou_pelo_menos_um = len(set_esperados.intersection(set_preditos)) > 0
+    
+    if acertou_pelo_menos_um:
+        acertos += 1
+
+    # Armazena os resultados para as métricas multi-rótulo e para o CSV final
+    y_true_list.append(cod_assuntos_esperados)
+    y_pred_list.append(codigos_classificados)
+
+    resultados_detalhados.append({
+        "texto": texto,
+        "cod_assuntos_esperados": '|'.join(map(str, cod_assuntos_esperados)),
+        "codigos_preditos": ', '.join(map(str, codigos_classificados)),
+        "acertou_pelo_menos_um": acertou_pelo_menos_um
+    })
+    
+    time.sleep(2)
+
+# --- Cálculo das Métricas ---
+print("\nClassificação concluída.")
+print("Iniciando cálculo das métricas...")
+
+if total_peticoes_processadas == 0:
+    print("Nenhuma petição foi processada. Encerrando.")
     sys.exit()
 
-print(f"Classificação concluída.")
-print(f"Iniciando cálculo das métricas de acurácia, precisão, recall e f1-score...")
+# Métrica 1: Taxa de Acerto
+taxa_de_acerto = acertos / total_peticoes_processadas
 
-acuracia = accuracy_score(y_true, y_pred)
-precisao = precision_score(y_true, y_pred, average="weighted", zero_division=0)
-revocacao = recall_score(y_true, y_pred, average="weighted", zero_division=0)
-f1 = f1_score(y_true, y_pred, average="weighted", zero_division=0)
+# Métrica 2: Métricas Multi-Rótulo Completas (para uma visão mais profunda)
+mlb = MultiLabelBinarizer()
+all_labels = set(l for sublist in y_true_list for l in sublist).union(set(l for sublist in y_pred_list for l in sublist))
+if not all_labels:
+    print("Nenhum rótulo encontrado para calcular as métricas multi-rótulo.")
+    f1_micro = precision_micro = recall_micro = 0.0
+else:
+    mlb.fit([list(all_labels)])
+    y_true_bin = mlb.transform(y_true_list)
+    y_pred_bin = mlb.transform(y_pred_list)
+    
+    precision_micro = precision_score(y_true_bin, y_pred_bin, average='micro', zero_division=0)
+    recall_micro = recall_score(y_true_bin, y_pred_bin, average='micro', zero_division=0)
+    f1_micro = f1_score(y_true_bin, y_pred_bin, average='micro', zero_division=0)
 
-print(f"Acurácia: {acuracia:.4f}")
-print(f"Precisão: {precisao:.4f}")
-print(f"Revocação: {revocacao:.4f}")
-print(f"F1-score: {f1:.4f}")
+# --- Exibição e Salvamento ---
+print("\n--- Métricas de Avaliação ---")
+print(f"Acurácia: {taxa_de_acerto:.4f}")
+print(f"Precisão: {precision_micro:.4f}")
+print(f"Revocação: {recall_micro:.4f}")
+print(f"F1-score: {f1_micro:.4f}")
 
-print(f"Salvando resultado...")
+print("\nSalvando resultados detalhados...")
+pd.DataFrame(resultados_detalhados).to_csv("data/resultados_classificacao.csv", index=False)
+print("Resultados salvos em data/resultados_classificacao.csv.")
 
-pd.DataFrame(resultados).to_csv("data/resultados_classificacao.csv", index=False)
-print("Resultados salvos em resultados_classificacao.csv.")
-
-print(f"Enviando resultado para o Influxdb...")
-
-metricas = [
-    Point("classificacao_api")
-        .tag("versao_modelo", "v1")
-        .field("acuracia", acuracia)
-        .field("precisao", precisao)
-        .field("revocacao", revocacao)
-        .field("f1_score", f1)
-        .time(datetime.datetime.now(), WritePrecision.NS)
-]
-
+# --- Envio para o InfluxDB ---
+print("\nEnviando resultado para o Influxdb...")
 try:
+    metricas = [
+        Point("classificacao_api")
+            .tag("versao_modelo", "v1")
+            .field("acuracia", taxa_de_acerto)
+            .field("precisao", precision_micro)
+            .field("revocacao", recall_micro)
+            .field("f1_score", f1_micro)
+            .time(datetime.datetime.now(), WritePrecision.NS)
+    ]
+
     client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
     write_api = client.write_api(write_options=SYNCHRONOUS)
     write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=metricas)
     client.close()
     print("Métricas enviadas para o InfluxDB com sucesso.")
-except ApiException as e:
-    print("ERRO ao enviar dados para o InfluxDB:")
-    print(f"  Status: {e.status}")
-    print(f"  Razão: {e.reason}")
-    print(f"  Corpo do Erro: {e.body}")
-    print("Verifique seu token, organização e bucket.")
+
 except Exception as e:
-    print("Ocorreu um erro inesperado:")
-    print(e)
-    
-print(f"Script finalizado.")
+    print(f"ERRO ao enviar dados para o InfluxDB: {e}")
+
+print("\nScript finalizado.")
